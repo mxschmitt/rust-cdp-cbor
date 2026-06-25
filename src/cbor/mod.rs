@@ -223,4 +223,60 @@ mod tests {
         eprintln!("  encode/msg: cbor = {cbor_enc:?}, json = {json_enc:?}");
         eprintln!("  decode/msg: cbor = {cbor_dec:?}, json = {json_dec:?}\n");
     }
+
+    /// Quantify the client's single-pass decode win: decoding CBOR straight
+    /// into a typed struct vs the old two-pass route (CBOR -> serde_json::Value
+    /// -> typed via from_value).
+    ///
+    ///   cargo test --release -- --nocapture bench_decode_paths
+    #[test]
+    fn bench_decode_paths() {
+        #[derive(Serialize, Deserialize, Clone)]
+        struct Node {
+            #[serde(rename = "nodeId")]
+            node_id: i32,
+            #[serde(rename = "nodeName")]
+            node_name: String,
+            attributes: Vec<String>,
+            children: Vec<Node>,
+        }
+        fn build(depth: u32, fanout: u32, c: &mut i32) -> Node {
+            *c += 1;
+            let id = *c;
+            let children = if depth == 0 {
+                vec![]
+            } else {
+                (0..fanout).map(|_| build(depth - 1, fanout, c)).collect()
+            };
+            Node {
+                node_id: id,
+                node_name: "DIV".into(),
+                attributes: vec!["class".into(), "container".into(), "id".into(), format!("n{id}")],
+                children,
+            }
+        }
+        let mut c = 0;
+        let root = build(5, 6, &mut c);
+        let cbor = to_vec(&root).unwrap();
+        eprintln!("\n  decode paths: {} nodes, {} KiB cbor", c, cbor.len() / 1024);
+
+        const N: u32 = 2000;
+        let t = std::time::Instant::now();
+        for _ in 0..N {
+            let _: Node = std::hint::black_box(from_slice(&cbor).unwrap());
+        }
+        let direct = t.elapsed() / N;
+
+        let t = std::time::Instant::now();
+        for _ in 0..N {
+            let v: serde_json::Value = from_slice(&cbor).unwrap();
+            let _: Node = std::hint::black_box(serde_json::from_value(v).unwrap());
+        }
+        let two_pass = t.elapsed() / N;
+
+        let speedup = two_pass.as_secs_f64() / direct.as_secs_f64();
+        eprintln!("  direct (cbor->typed):     {direct:?}");
+        eprintln!("  two-pass (cbor->Value->typed): {two_pass:?}");
+        eprintln!("  -> single-pass is {speedup:.2}x faster\n");
+    }
 }

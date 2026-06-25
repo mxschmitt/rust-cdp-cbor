@@ -78,35 +78,56 @@ impl Client {
         let bytes = cbor::to_vec(&req).map_err(|e| Error::Encode(e.0))?;
         self.conn.send_raw(&bytes)?;
 
-        // Pump messages until we see the response with our id. Events and
-        // responses to other ids are skipped.
+        // Pump messages until we see the response with our id. We decode each
+        // frame *directly* from CBOR into the typed reply in a single pass —
+        // no intermediate `serde_json::Value` tree. This is sound for this
+        // synchronous client because the only `result`-bearing message in
+        // flight is the reply to the one command we just sent; every other
+        // inbound message is an event (a `method`/`params` pair with no `id`
+        // and no `result`), whose extra fields the typed `Reply` simply
+        // ignores, leaving `id = None` so it is skipped.
         loop {
             let frame = self.conn.recv_raw()?;
-            let msg: serde_json::Value =
+            let reply: Reply<C::Response> =
                 cbor::from_slice(&frame).map_err(|e| Error::Decode(e.0))?;
 
-            // Events have a "method" but no "id"; skip them.
-            let msg_id = msg.get("id").and_then(|v| v.as_u64());
-            if msg_id != Some(id) {
-                continue;
+            if reply.id != Some(id) {
+                continue; // event or unrelated message
             }
-
-            if let Some(err) = msg.get("error") {
-                let code = err.get("code").and_then(|v| v.as_i64()).unwrap_or(0);
-                let message = err
-                    .get("message")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                return Err(Error::Protocol { code, message });
+            if let Some(err) = reply.error {
+                return Err(Error::Protocol {
+                    code: err.code,
+                    message: err.message,
+                });
             }
-
-            let result = msg
-                .get("result")
-                .cloned()
-                .unwrap_or(serde_json::Value::Object(Default::default()));
-            return serde_json::from_value::<C::Response>(result)
-                .map_err(|e| Error::Decode(e.to_string()));
+            return reply
+                .result
+                .ok_or_else(|| Error::Decode("response missing result".into()));
         }
     }
+}
+
+/// A typed CDP reply envelope, deserialized directly from CBOR. Unknown fields
+/// (e.g. an event's `method`/`params`) are ignored by serde, so non-matching
+/// messages decode harmlessly with `id = None`.
+#[derive(serde::Deserialize)]
+struct Reply<R> {
+    #[serde(default)]
+    id: Option<u64>,
+    #[serde(default = "none")]
+    result: Option<R>,
+    #[serde(default)]
+    error: Option<ProtocolError>,
+}
+
+#[derive(serde::Deserialize)]
+struct ProtocolError {
+    #[serde(default)]
+    code: i64,
+    #[serde(default)]
+    message: String,
+}
+
+fn none<R>() -> Option<R> {
+    None
 }
