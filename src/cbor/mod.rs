@@ -60,4 +60,72 @@ mod tests {
         assert_eq!(len, 2); // BF FF
         assert_eq!(&bytes[7..], &[0xBF, 0xFF]);
     }
+
+    /// Compare our crdtp-CBOR codec against serde_json on a realistic CDP
+    /// request, for both size and encode/decode throughput. Run with:
+    ///   cargo test --release -- --nocapture bench_cbor_vs_json
+    #[test]
+    fn bench_cbor_vs_json() {
+        #[derive(Serialize, Deserialize, Clone)]
+        struct Eval {
+            expression: String,
+            #[serde(rename = "returnByValue")]
+            return_by_value: bool,
+            #[serde(rename = "awaitPromise")]
+            await_promise: bool,
+        }
+        #[derive(Serialize, Deserialize, Clone)]
+        struct Req {
+            id: u64,
+            method: String,
+            params: Eval,
+            #[serde(rename = "sessionId")]
+            session_id: String,
+        }
+        let req = Req {
+            id: 42,
+            method: "Runtime.evaluate".into(),
+            params: Eval {
+                expression: "document.title".into(),
+                return_by_value: true,
+                await_promise: false,
+            },
+            session_id: "A5FF6DD5F68E134D97EEB6044B76873D".into(),
+        };
+
+        let cbor = to_vec(&req).unwrap();
+        let json = serde_json::to_vec(&req).unwrap();
+        eprintln!("\n  size:  cbor = {} bytes, json = {} bytes", cbor.len(), json.len());
+
+        const N: u32 = 200_000;
+        let t = std::time::Instant::now();
+        for i in 0..N {
+            let mut r = req.clone();
+            r.id = i as u64;
+            std::hint::black_box(to_vec(&r).unwrap());
+        }
+        let cbor_enc = t.elapsed();
+        let t = std::time::Instant::now();
+        for i in 0..N {
+            let mut r = req.clone();
+            r.id = i as u64;
+            std::hint::black_box(serde_json::to_vec(&r).unwrap());
+        }
+        let json_enc = t.elapsed();
+
+        let t = std::time::Instant::now();
+        for _ in 0..N {
+            let _: serde_json::Value = std::hint::black_box(from_slice(&cbor).unwrap());
+        }
+        let cbor_dec = t.elapsed();
+        let t = std::time::Instant::now();
+        for _ in 0..N {
+            let _: serde_json::Value =
+                std::hint::black_box(serde_json::from_slice(&json).unwrap());
+        }
+        let json_dec = t.elapsed();
+
+        eprintln!("  encode {N} iters: cbor = {cbor_enc:?}, json = {json_enc:?}");
+        eprintln!("  decode {N} iters: cbor = {cbor_dec:?}, json = {json_dec:?}\n");
+    }
 }
