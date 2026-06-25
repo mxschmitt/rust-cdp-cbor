@@ -236,13 +236,13 @@ fn main() -> std::io::Result<()> {
             series("JSON", "#dc2626", &dom, |p| p.json_bytes as f64 / 1024.0),
             series("CBOR (crdtp)", "#2563eb", &dom, |p| p.cbor_bytes as f64 / 1024.0),
         ])?;
-    write_chart("bench/throughput.svg",
-        "Throughput — encode+decode round-trips/sec (DOM)",
-        "DOM nodes (log)", "round-trips / sec",
+    write_chart_opt("bench/throughput.svg",
+        "Throughput — encode+decode round-trips/sec (DOM, log-log)",
+        "DOM nodes (log)", "round-trips / sec (log)",
         &[
             series("JSON", "#dc2626", &dom, |p| p.json_rt_per_s),
             series("CBOR (crdtp)", "#2563eb", &dom, |p| p.cbor_rt_per_s),
-        ])?;
+        ], true)?;
 
     // A "when is it worth it" chart: CBOR/JSON size ratio across all shapes.
     let bars: Vec<(String, f64, f64)> = pts.iter().map(|p| {
@@ -300,6 +300,10 @@ fn series<F: Fn(&Point) -> f64>(name: &str, color: &str, pts: &[&Point], f: F) -
 }
 
 fn write_chart(path: &str, title: &str, xl: &str, yl: &str, series: &[Series]) -> std::io::Result<()> {
+    write_chart_opt(path, title, xl, yl, series, false)
+}
+
+fn write_chart_opt(path: &str, title: &str, xl: &str, yl: &str, series: &[Series], log_y: bool) -> std::io::Result<()> {
     let (w, h) = (840.0, 470.0);
     let (ml, mr, mt, mb) = (80.0, 175.0, 54.0, 66.0);
     let pw = w - ml - mr;
@@ -309,19 +313,38 @@ fn write_chart(path: &str, title: &str, xl: &str, yl: &str, series: &[Series]) -
     let xmin = xs.iter().cloned().fold(f64::INFINITY, f64::min).max(1.0);
     let xmax = xs.iter().cloned().fold(0.0, f64::max);
     let ymax = ys.iter().cloned().fold(0.0, f64::max) * 1.08;
+    let ymin_pos = ys.iter().cloned().filter(|v| *v > 0.0).fold(f64::INFINITY, f64::min);
     let (lxmin, lxmax) = (xmin.log10(), xmax.log10());
     let sx = |x: f64| ml + (x.max(1.0).log10() - lxmin) / (lxmax - lxmin) * pw;
-    let sy = |y: f64| mt + ph - (y / ymax) * ph;
+    let (lymin, lymax) = (ymin_pos.log10().floor(), ymax.log10().ceil());
+    let sy = |y: f64| {
+        if log_y {
+            mt + ph - (y.max(ymin_pos).log10() - lymin) / (lymax - lymin) * ph
+        } else {
+            mt + ph - (y / ymax) * ph
+        }
+    };
 
     let mut s = String::new();
     s.push_str(&format!(r##"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" font-family="-apple-system,Segoe UI,Roboto,sans-serif"><rect width="{w}" height="{h}" fill="#ffffff"/>"##));
     s.push_str(&format!(r##"<text x="{ml}" y="30" font-size="18" font-weight="600" fill="#111">{}</text>"##, esc(title)));
 
-    for i in 0..=5 {
-        let yv = ymax * i as f64 / 5.0;
-        let y = sy(yv);
-        s.push_str(&format!(r##"<line x1="{ml}" y1="{y:.1}" x2="{:.1}" y2="{y:.1}" stroke="#e5e7eb"/>"##, ml + pw));
-        s.push_str(&format!(r##"<text x="{:.1}" y="{:.1}" font-size="11" fill="#6b7280" text-anchor="end">{}</text>"##, ml - 8.0, y + 4.0, fmt_num(yv)));
+    if log_y {
+        let mut dy = lymin;
+        while dy <= lymax + 1e-9 {
+            let yv = 10f64.powf(dy);
+            let y = sy(yv);
+            s.push_str(&format!(r##"<line x1="{ml}" y1="{y:.1}" x2="{:.1}" y2="{y:.1}" stroke="#e5e7eb"/>"##, ml + pw));
+            s.push_str(&format!(r##"<text x="{:.1}" y="{:.1}" font-size="11" fill="#6b7280" text-anchor="end">{}</text>"##, ml - 8.0, y + 4.0, fmt_num(yv)));
+            dy += 1.0;
+        }
+    } else {
+        for i in 0..=5 {
+            let yv = ymax * i as f64 / 5.0;
+            let y = sy(yv);
+            s.push_str(&format!(r##"<line x1="{ml}" y1="{y:.1}" x2="{:.1}" y2="{y:.1}" stroke="#e5e7eb"/>"##, ml + pw));
+            s.push_str(&format!(r##"<text x="{:.1}" y="{:.1}" font-size="11" fill="#6b7280" text-anchor="end">{}</text>"##, ml - 8.0, y + 4.0, fmt_num(yv)));
+        }
     }
     let mut d = lxmin.floor();
     while d <= lxmax + 1e-9 {
@@ -359,41 +382,49 @@ fn write_chart(path: &str, title: &str, xl: &str, yl: &str, series: &[Series]) -
 /// A value < 1.0 on size means CBOR is smaller; > 1.0 on throughput means CBOR
 /// is faster. The 1.0 line is the break-even marker.
 fn write_ratio_chart(path: &str, bars: &[(String, f64, f64)]) -> std::io::Result<()> {
-    let (w, h) = (1000.0, 480.0);
-    let (ml, mr, mt, mb) = (70.0, 160.0, 56.0, 120.0);
+    let (w, h) = (1040.0, 500.0);
+    let (ml, mr, mt, mb) = (70.0, 165.0, 64.0, 128.0);
     let pw = w - ml - mr;
     let ph = h - mt - mb;
-    let ymax = bars.iter().map(|b| b.1.max(b.2)).fold(1.2f64, f64::max) * 1.05;
-    let sy = |v: f64| mt + ph - (v / ymax) * ph;
+    // Log-y axis: ratios span ~0.28 (binary size) to ~434 (binary speed), so a
+    // linear axis hides the size bars near 1.0. Decades from 0.1 to 1000.
+    let vmin = 0.1f64;
+    let vmax = bars.iter().map(|b| b.1.max(b.2)).fold(1.0f64, f64::max) * 1.3;
+    let (lmin, lmax) = (vmin.log10(), vmax.log10());
+    let sy = |v: f64| mt + ph - (v.max(vmin).log10() - lmin) / (lmax - lmin) * ph;
     let n = bars.len();
     let group_w = pw / n as f64;
     let bw = group_w * 0.34;
 
     let mut s = String::new();
     s.push_str(&format!(r##"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" font-family="-apple-system,Segoe UI,Roboto,sans-serif"><rect width="{w}" height="{h}" fill="#ffffff"/>"##));
-    s.push_str(&format!(r##"<text x="{ml}" y="30" font-size="18" font-weight="600" fill="#111">When is CBOR worth it? — CBOR/JSON ratios per payload</text>"##));
-    s.push_str(&format!(r##"<text x="{ml}" y="48" font-size="12" fill="#6b7280">size ratio &lt; 1.0 = CBOR smaller · speed ratio &gt; 1.0 = CBOR faster · dashed line = break-even</text>"##));
+    s.push_str(&format!(r##"<text x="{ml}" y="30" font-size="18" font-weight="600" fill="#111">When is CBOR worth it? — CBOR/JSON ratios per payload (log scale)</text>"##));
+    s.push_str(&format!(r##"<text x="{ml}" y="48" font-size="12" fill="#6b7280">size ratio &lt; 1 = CBOR smaller · speed ratio &gt; 1 = CBOR faster · dashed line = break-even (1.0)</text>"##));
 
-    for i in 0..=5 {
-        let yv = ymax * i as f64 / 5.0;
-        let y = sy(yv);
+    // Log gridlines per decade.
+    let mut d = lmin.floor();
+    while d <= lmax + 1e-9 {
+        let v = 10f64.powf(d);
+        let y = sy(v);
         s.push_str(&format!(r##"<line x1="{ml}" y1="{y:.1}" x2="{:.1}" y2="{y:.1}" stroke="#eef2f7"/>"##, ml + pw));
-        s.push_str(&format!(r##"<text x="{:.1}" y="{:.1}" font-size="11" fill="#6b7280" text-anchor="end">{:.1}</text>"##, ml - 8.0, y + 4.0, yv));
+        s.push_str(&format!(r##"<text x="{:.1}" y="{:.1}" font-size="11" fill="#6b7280" text-anchor="end">{}</text>"##, ml - 8.0, y + 4.0, fmt_ratio(v)));
+        d += 1.0;
     }
     // break-even line at 1.0
     let y1 = sy(1.0);
-    s.push_str(&format!(r##"<line x1="{ml}" y1="{y1:.1}" x2="{:.1}" y2="{y1:.1}" stroke="#111" stroke-dasharray="5 4" stroke-width="1.2"/>"##, ml + pw));
+    s.push_str(&format!(r##"<line x1="{ml}" y1="{y1:.1}" x2="{:.1}" y2="{y1:.1}" stroke="#111" stroke-dasharray="5 4" stroke-width="1.4"/>"##, ml + pw));
+    let base = sy(vmin); // bars grow from the bottom of the plot
 
     for (i, (label, size_ratio, speed_ratio)) in bars.iter().enumerate() {
         let gx = ml + i as f64 * group_w + group_w / 2.0;
-        // size ratio bar (left)
+        // size ratio bar (left, blue)
         let x1 = gx - bw - 2.0;
         let y = sy(*size_ratio);
-        s.push_str(&format!(r##"<rect x="{x1:.1}" y="{y:.1}" width="{bw:.1}" height="{:.1}" fill="#2563eb"/>"##, mt + ph - y));
-        // speed ratio bar (right)
+        s.push_str(&format!(r##"<rect x="{x1:.1}" y="{y:.1}" width="{bw:.1}" height="{:.1}" fill="#2563eb"/>"##, base - y));
+        // speed ratio bar (right, green)
         let x2 = gx + 2.0;
         let y = sy(*speed_ratio);
-        s.push_str(&format!(r##"<rect x="{x2:.1}" y="{y:.1}" width="{bw:.1}" height="{:.1}" fill="#16a34a"/>"##, mt + ph - y));
+        s.push_str(&format!(r##"<rect x="{x2:.1}" y="{y:.1}" width="{bw:.1}" height="{:.1}" fill="#16a34a"/>"##, base - y));
         // x label rotated
         s.push_str(&format!(r##"<text x="{gx:.1}" y="{:.1}" font-size="10" fill="#374151" text-anchor="end" transform="rotate(-40 {gx:.1} {:.1})">{}</text>"##, mt + ph + 14.0, mt + ph + 14.0, esc(label)));
     }
@@ -402,6 +433,14 @@ fn write_ratio_chart(path: &str, bars: &[(String, f64, f64)]) -> std::io::Result
     s.push_str(&format!(r##"<rect x="{:.1}" y="{:.1}" width="14" height="14" rx="3" fill="#16a34a"/><text x="{:.1}" y="{:.1}" font-size="12" fill="#374151">speed (cbor/json)</text>"##, ml + pw + 22.0, mt + 24.0, ml + pw + 42.0, mt + 36.0));
     s.push_str("</svg>");
     std::fs::write(path, s)
+}
+
+fn fmt_ratio(v: f64) -> String {
+    if v >= 1.0 {
+        format!("{v:.0}x")
+    } else {
+        format!("{v:.1}")
+    }
 }
 
 fn esc(s: &str) -> String {

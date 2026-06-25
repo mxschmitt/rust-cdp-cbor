@@ -198,18 +198,62 @@ Run the codec tests:
 cargo test
 ```
 
+## Benchmarks — is CBOR worth it?
+
+`cargo run --release --example bench_sweep` sweeps three payload shapes that
+map to real CDP responses, scaling each up to ~5 MB, and writes a CSV plus
+three SVG charts to `bench/`. It measures wire size, encode/decode time, and
+round-trip throughput.
+
+**The answer depends entirely on payload shape:**
+
+| Shape | Example CDP call | Size (CBOR vs JSON) | Round-trip speed |
+|---|---|---|---|
+| **DOM** (string-heavy) | `DOM.getDocument` | **~8% smaller** | ~1.0–1.4× (slight CBOR win) |
+| **Numeric** (ints/floats) | `Profiler.takeCoverage` | **~15% *larger*** † | ~1.3–1.9× CBOR |
+| **Binary** (blobs) | `Page.captureScreenshot` | **~72% smaller** | **20–840× CBOR** |
+
+† crdtp wraps *every* sub-array in a 7-byte envelope, so arrays of tiny tuples
+(coverage ranges) actually cost more bytes than JSON — a real, measured
+gotcha, not a guess.
+
+![size](bench/size.png)
+![throughput](bench/throughput.png)
+![when is CBOR worth it](bench/ratio.png)
+
+**Takeaways**
+
+* For **lots of DOM**, CBOR is modestly smaller and roughly ties-to-slightly-
+  faster — the codec, not the wire, dominates, and `serde_json` is extremely
+  well optimized.
+* For **binary** responses (screenshots, `Network.getResponseBody`, PDFs) CBOR
+  is a runaway win: JSON must base64-encode (**+33% size**) *and* escape every
+  byte, while CBOR sends raw bytes. This is where the CBOR pipe earns its keep.
+* For **numeric** data CBOR is faster but can be *larger* due to envelope
+  overhead — worth knowing before assuming "binary format = smaller".
+
+### Client efficiency
+
+`Client::execute` decodes each CBOR reply **directly into the typed response**
+in a single pass — no intermediate `serde_json::Value` tree. Measured at
+**~1.5× faster decode** vs the two-pass route (`bench_decode_paths`).
+
 ## Layout
 
 ```
 src/
+  lib.rs         library crate (cbor / client / pipe modules)
   main.rs        demo: spawn → create target → attach → navigate → get title
   client.rs      typed Client over the pipe (chromiumoxide_cdp commands)
   pipe.rs        spawn Chrome with the CBOR pipe; fd 3/4 transport + framing
   cbor/
-    mod.rs       module entry + round-trip tests
+    mod.rs       module entry + round-trip tests + codec benchmarks
     consts.rs    crdtp CBOR byte constants (derived from major/info rules)
     ser.rs       serde Serializer → crdtp CBOR
     de.rs        serde Deserializer ← crdtp CBOR + frame length parsing
+examples/
+  bench_sweep.rs CBOR-vs-JSON sweep across payload shapes; emits CSV + SVGs
+bench/           generated benchmark results (CSV + charts)
 ```
 
 ## Limitations
