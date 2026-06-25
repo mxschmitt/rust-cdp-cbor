@@ -4,17 +4,13 @@
 //! create a tab, attach to it, navigate, and read the page title — all using
 //! strongly-typed `chromiumoxide_cdp` command structs encoded as crdtp CBOR.
 
-mod cbor;
-mod client;
-mod pipe;
-
 use chromiumoxide_cdp::cdp::browser_protocol::page::NavigateParams;
 use chromiumoxide_cdp::cdp::browser_protocol::target::{
     AttachToTargetParams, CreateTargetParams,
 };
 use chromiumoxide_cdp::cdp::js_protocol::runtime::EvaluateParams;
-use client::Client;
-use pipe::PipeConn;
+use rust_cdp::client::Client;
+use rust_cdp::pipe::PipeConn;
 
 const DEFAULT_CHROME: &str =
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";

@@ -75,21 +75,32 @@ impl<'de> Deserializer<'de> {
         Ok((major, value))
     }
 
-    /// If the cursor sits on an envelope, step past tag + byte-string header so
-    /// the cursor lands on the wrapped map/array initial byte.
-    fn skip_envelope(&mut self) -> Result<()> {
-        if self.peek()? != INITIAL_BYTE_ENVELOPE {
-            return Ok(());
-        }
+    /// Step past an envelope header (tag + byte-string length) so the cursor
+    /// lands on the wrapped map/array initial byte, and return the absolute
+    /// offset of the envelope's end (`content start + content length`).
+    ///
+    /// Snapping to this end after decoding the contents makes us robust to how
+    /// much the serde visitor actually consumed — e.g. a fixed-size tuple
+    /// `[i32; N]` reads exactly N elements and never consumes the indefinite
+    /// array's trailing stop byte, but the envelope length still bounds it.
+    fn enter_envelope(&mut self) -> Result<usize> {
         self.pos += 1; // 0xD8
         if self.peek()? == CBOR_ENVELOPE_TAG {
             self.pos += 1; // 0x18
         }
-        // Now a BYTE_STRING token whose payload length we discard (the
-        // indefinite contents are self-terminating via the stop byte).
-        let (major, _len) = self.read_token()?;
+        let (major, len) = self.read_token()?;
         if major != MAJOR_BYTE_STRING {
             return Err(Error("envelope missing byte-string header".into()));
+        }
+        Ok(self.pos + len as usize)
+    }
+
+    /// If the cursor sits on an envelope, step past its header (ignoring the
+    /// returned end offset). Used where the contents are read by a stop-byte
+    /// terminated visitor that doesn't need the bound.
+    fn skip_envelope(&mut self) -> Result<()> {
+        if self.peek()? == INITIAL_BYTE_ENVELOPE {
+            self.enter_envelope()?;
         }
         Ok(())
     }
@@ -109,10 +120,15 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
 
     fn deserialize_any<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
         let b = self.peek()?;
-        // Envelope -> the wrapped value (always a map or array in CDP).
+        // Envelope -> the wrapped value (always a map or array in CDP). Decode
+        // the contents, then snap the cursor to the envelope's declared end so
+        // any unconsumed trailing bytes (e.g. a stop byte after a fixed-size
+        // tuple) are skipped.
         if b == INITIAL_BYTE_ENVELOPE {
-            self.skip_envelope()?;
-            return self.deserialize_any(visitor);
+            let end = self.enter_envelope()?;
+            let value = self.deserialize_any(visitor)?;
+            self.pos = end;
+            return Ok(value);
         }
         let major = (b & MAJOR_MASK) >> MAJOR_TYPE_SHIFT;
         let info = b & INFO_MASK;
