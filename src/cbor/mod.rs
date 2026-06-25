@@ -12,7 +12,7 @@ pub mod de;
 pub mod ser;
 
 pub use de::{from_slice, message_len};
-pub use ser::to_vec;
+pub use ser::{to_buf, to_vec};
 
 #[cfg(test)]
 mod tests {

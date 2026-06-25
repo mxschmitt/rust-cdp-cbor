@@ -41,6 +41,18 @@ pub fn to_vec<T: Serialize>(value: &T) -> Result<Vec<u8>> {
     Ok(s.out)
 }
 
+/// Serialize `value` by appending to a caller-owned buffer. Lets a hot send
+/// loop reuse one allocation across many messages (`buf.clear()` between
+/// calls) instead of allocating a fresh `Vec` each time.
+pub fn to_buf<T: Serialize>(value: &T, buf: &mut Vec<u8>) -> Result<()> {
+    // Move the buffer into the Serializer and back to avoid copying; the
+    // Serializer owns a Vec, so we swap to reuse the caller's allocation.
+    let mut s = Serializer { out: std::mem::take(buf) };
+    let r = value.serialize(&mut s);
+    *buf = s.out;
+    r
+}
+
 pub struct Serializer {
     out: Vec<u8>,
 }
@@ -48,6 +60,7 @@ pub struct Serializer {
 impl Serializer {
     /// Write a token start: initial byte for `major`, packing `value` either
     /// inline or as a 1/2/4/8-byte big-endian payload (RFC 7049 §2.1).
+    #[inline]
     fn write_token_start(&mut self, major: u8, value: u64) {
         let mt = major << MAJOR_TYPE_SHIFT;
         if value < 24 {
@@ -67,6 +80,7 @@ impl Serializer {
         }
     }
 
+    #[inline]
     fn write_int(&mut self, v: i64) {
         if v >= 0 {
             self.write_token_start(MAJOR_UNSIGNED, v as u64);
@@ -76,6 +90,7 @@ impl Serializer {
         }
     }
 
+    #[inline]
     fn write_str(&mut self, s: &str) {
         self.write_token_start(MAJOR_STRING, s.len() as u64);
         self.out.extend_from_slice(s.as_bytes());

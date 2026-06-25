@@ -40,14 +40,17 @@ pub struct Deserializer<'de> {
 }
 
 impl<'de> Deserializer<'de> {
+    #[inline]
     fn peek(&self) -> Result<u8> {
         self.input.get(self.pos).copied().ok_or_else(|| Error("unexpected EOF".into()))
     }
+    #[inline]
     fn take(&mut self) -> Result<u8> {
         let b = self.peek()?;
         self.pos += 1;
         Ok(b)
     }
+    #[inline]
     fn take_n(&mut self, n: usize) -> Result<&'de [u8]> {
         if self.pos + n > self.input.len() {
             return Err(Error("unexpected EOF".into()));
@@ -59,8 +62,17 @@ impl<'de> Deserializer<'de> {
 
     /// Read a token start, returning (major_type, value). For BYTE_STRING /
     /// STRING the value is the length; for ints it is the payload.
+    #[inline]
     fn read_token(&mut self) -> Result<(u8, u64)> {
         let initial = self.take()?;
+        self.read_token_after(initial)
+    }
+
+    /// Like [`read_token`], but the caller has already consumed the initial
+    /// byte (e.g. after a `peek`), so we skip the redundant bounds-checked
+    /// read. The caller must have advanced `pos` past `initial`.
+    #[inline]
+    fn read_token_after(&mut self, initial: u8) -> Result<(u8, u64)> {
         let major = (initial & MAJOR_MASK) >> MAJOR_TYPE_SHIFT;
         let info = initial & INFO_MASK;
         let value = match info {
@@ -132,49 +144,42 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
         }
         let major = (b & MAJOR_MASK) >> MAJOR_TYPE_SHIFT;
         let info = b & INFO_MASK;
+        // We already peeked `b`; consume it and pass it to read_token_after so
+        // scalar/length tokens aren't re-read with a second bounds check.
+        self.pos += 1;
         match (major, info) {
             (MAJOR_UNSIGNED, _) => {
-                let (_, v) = self.read_token()?;
+                let (_, v) = self.read_token_after(b)?;
                 visitor.visit_i64(v as i64)
             }
             (MAJOR_NEGATIVE, _) => {
-                let (_, v) = self.read_token()?;
+                let (_, v) = self.read_token_after(b)?;
                 visitor.visit_i64(-1 - v as i64)
             }
             (MAJOR_BYTE_STRING, _) => {
-                let (_, len) = self.read_token()?;
+                let (_, len) = self.read_token_after(b)?;
                 let bytes = self.take_n(len as usize)?;
                 visitor.visit_borrowed_bytes(bytes)
             }
-            (MAJOR_STRING, _) => visitor.visit_borrowed_str(self.read_str()?),
-            (MAJOR_ARRAY, 31) => {
-                self.pos += 1;
-                visitor.visit_seq(Indef { de: self })
+            (MAJOR_STRING, _) => {
+                let (_, len) = self.read_token_after(b)?;
+                let bytes = self.take_n(len as usize)?;
+                let s = std::str::from_utf8(bytes).map_err(|e| Error(e.to_string()))?;
+                visitor.visit_borrowed_str(s)
             }
-            (MAJOR_MAP, 31) => {
-                self.pos += 1;
-                visitor.visit_map(Indef { de: self })
-            }
-            (MAJOR_SIMPLE, 20) => {
-                self.pos += 1;
-                visitor.visit_bool(false)
-            }
-            (MAJOR_SIMPLE, 21) => {
-                self.pos += 1;
-                visitor.visit_bool(true)
-            }
-            (MAJOR_SIMPLE, 22) => {
-                self.pos += 1;
-                visitor.visit_unit()
-            }
+            (MAJOR_ARRAY, 31) => visitor.visit_seq(Indef { de: self }),
+            (MAJOR_MAP, 31) => visitor.visit_map(Indef { de: self }),
+            (MAJOR_SIMPLE, 20) => visitor.visit_bool(false),
+            (MAJOR_SIMPLE, 21) => visitor.visit_bool(true),
+            (MAJOR_SIMPLE, 22) => visitor.visit_unit(),
             (MAJOR_SIMPLE, INFO_8BYTES) => {
-                self.pos += 1;
                 let bytes = self.take_n(8)?;
                 visitor.visit_f64(f64::from_be_bytes(bytes.try_into().unwrap()))
             }
             (MAJOR_TAG, _) => {
-                // Skip any non-envelope tag (e.g. base64-binary tag 22).
-                let _ = self.read_token()?;
+                // Skip any non-envelope tag (e.g. base64-binary tag 22), then
+                // decode the tagged value.
+                let _ = self.read_token_after(b)?;
                 self.deserialize_any(visitor)
             }
             _ => Err(Error(format!("unsupported initial byte 0x{b:02x}"))),

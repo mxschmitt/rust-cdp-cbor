@@ -14,6 +14,9 @@ use serde::Serialize;
 pub struct Client {
     conn: PipeConn,
     next_id: u64,
+    /// Reused across `execute` calls so the hot send path doesn't allocate a
+    /// fresh encode buffer per command (see `cbor::to_buf`).
+    enc_buf: Vec<u8>,
 }
 
 /// The on-the-wire CDP request. `params` serializes inline as the command's
@@ -55,7 +58,7 @@ impl From<std::io::Error> for Error {
 
 impl Client {
     pub fn new(conn: PipeConn) -> Self {
-        Client { conn, next_id: 1 }
+        Client { conn, next_id: 1, enc_buf: Vec::with_capacity(4096) }
     }
 
     /// Send a typed command (optionally on a session) and return its typed
@@ -75,8 +78,14 @@ impl Client {
             params: cmd,
             session_id,
         };
-        let bytes = cbor::to_vec(&req).map_err(|e| Error::Encode(e.0))?;
-        self.conn.send_raw(&bytes)?;
+        self.enc_buf.clear();
+        cbor::to_buf(&req, &mut self.enc_buf).map_err(|e| Error::Encode(e.0))?;
+        // Take the buffer out so we can borrow `self.conn` mutably to send,
+        // then return it for reuse on the next call.
+        let buf = std::mem::take(&mut self.enc_buf);
+        let send = self.conn.send_raw(&buf);
+        self.enc_buf = buf;
+        send?;
 
         // Pump messages until we see the response with our id. We decode each
         // frame *directly* from CBOR into the typed reply in a single pass —

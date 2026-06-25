@@ -238,6 +238,33 @@ gotcha, not a guess.
 in a single pass — no intermediate `serde_json::Value` tree. Measured at
 **~1.5× faster decode** vs the two-pass route (`bench_decode_paths`).
 
+### Where the time goes (profiling)
+
+`cargo run --release --example profile` breaks the codec down with
+single-dimension payloads and an A/B of candidate optimizations. Findings that
+drove the current code:
+
+* **Decode dominates** — encode runs ~900–1400 MB/s, decode ~200–1000 MB/s
+  depending on shape. The codec is **CPU-bound, not memory-bound** (a raw
+  byte-scan of the same buffer runs at ~40–60 GB/s).
+* **`#[inline]` on the hot parse/emit primitives** (`read_token`, `peek`,
+  `take`, `write_token_start`) was the single biggest win — roughly **2× on
+  integer decode** and a large bump everywhere, because it lets the optimizer
+  fuse the per-token bounds checks. This is the main reason CBOR now beats
+  `serde_json` on encode for every shape and on decode for ints/DOM.
+* **Removing a redundant byte read** in `deserialize_any` (it peeked the
+  initial byte, then `read_token` re-read it) shaves a bounds check per token
+  on the parse-bound integer path.
+* **Decode cost split** (DOM): ~40% parsing, ~60% serde struct-building. The
+  struct-building half is `String`/`Vec` allocation that's inherent to *owned*
+  deserialization — `serde_json` pays the identical cost, so it's not
+  addressable without borrowed types (which the chromiumoxide types don't use).
+  This is also why JSON stays marginally ahead on the pure-string decode case.
+* **Buffer reuse** (`cbor::to_buf`, used by `Client`) avoids a per-message
+  allocation. The microbenchmark gain is in the noise (the allocator caches the
+  freed block), but it's free and matters under allocator pressure / many
+  concurrent clients.
+
 ## Layout
 
 ```
@@ -253,6 +280,7 @@ src/
     de.rs        serde Deserializer ← crdtp CBOR + frame length parsing
 examples/
   bench_sweep.rs CBOR-vs-JSON sweep across payload shapes; emits CSV + SVGs
+  profile.rs     codec profiler: per-component breakdown + optimization A/Bs
 bench/           generated benchmark results (CSV + charts)
 ```
 
