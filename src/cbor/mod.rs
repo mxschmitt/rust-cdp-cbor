@@ -128,4 +128,99 @@ mod tests {
         eprintln!("  encode {N} iters: cbor = {cbor_enc:?}, json = {json_enc:?}");
         eprintln!("  decode {N} iters: cbor = {cbor_dec:?}, json = {json_dec:?}\n");
     }
+
+    /// Simulate a large `DOM.getDocument` style response: a deep, wide tree of
+    /// nodes mixing small ints (nodeId/nodeType), short strings (tag names),
+    /// and string arrays (attributes). This is the payload shape that matters
+    /// when "the browser returns a lot of DOM".
+    ///
+    ///   cargo test --release -- --nocapture bench_large_dom
+    #[test]
+    fn bench_large_dom() {
+        #[derive(Serialize, Deserialize, Clone)]
+        struct Node {
+            #[serde(rename = "nodeId")]
+            node_id: i32,
+            #[serde(rename = "nodeType")]
+            node_type: i32,
+            #[serde(rename = "nodeName")]
+            node_name: String,
+            #[serde(rename = "localName")]
+            local_name: String,
+            #[serde(rename = "nodeValue")]
+            node_value: String,
+            #[serde(rename = "childNodeCount")]
+            child_node_count: i32,
+            // attributes are a flat [name, value, name, value, ...] string list
+            attributes: Vec<String>,
+            children: Vec<Node>,
+        }
+
+        // Build a tree: `fanout` children per node, `depth` deep.
+        fn build(depth: u32, fanout: u32, counter: &mut i32) -> Node {
+            *counter += 1;
+            let id = *counter;
+            let children = if depth == 0 {
+                Vec::new()
+            } else {
+                (0..fanout).map(|_| build(depth - 1, fanout, counter)).collect()
+            };
+            Node {
+                node_id: id,
+                node_type: 1,
+                node_name: "DIV".into(),
+                local_name: "div".into(),
+                node_value: String::new(),
+                child_node_count: children.len() as i32,
+                attributes: vec![
+                    "class".into(),
+                    "container flex items-center".into(),
+                    "data-id".into(),
+                    format!("node-{id}"),
+                    "role".into(),
+                    "presentation".into(),
+                ],
+                children,
+            }
+        }
+
+        let mut counter = 0;
+        let root = build(6, 6, &mut counter); // ~55k nodes
+        eprintln!("\n  large DOM: {} nodes", counter);
+
+        let cbor = to_vec(&root).unwrap();
+        let json = serde_json::to_vec(&root).unwrap();
+        eprintln!(
+            "  size:  cbor = {} KiB, json = {} KiB  ({:+.1}% vs json)",
+            cbor.len() / 1024,
+            json.len() / 1024,
+            (cbor.len() as f64 / json.len() as f64 - 1.0) * 100.0
+        );
+
+        const N: u32 = 200;
+        let t = std::time::Instant::now();
+        for _ in 0..N {
+            std::hint::black_box(to_vec(&root).unwrap());
+        }
+        let cbor_enc = t.elapsed() / N;
+        let t = std::time::Instant::now();
+        for _ in 0..N {
+            std::hint::black_box(serde_json::to_vec(&root).unwrap());
+        }
+        let json_enc = t.elapsed() / N;
+
+        let t = std::time::Instant::now();
+        for _ in 0..N {
+            let _: Node = std::hint::black_box(from_slice(&cbor).unwrap());
+        }
+        let cbor_dec = t.elapsed() / N;
+        let t = std::time::Instant::now();
+        for _ in 0..N {
+            let _: Node = std::hint::black_box(serde_json::from_slice(&json).unwrap());
+        }
+        let json_dec = t.elapsed() / N;
+
+        eprintln!("  encode/msg: cbor = {cbor_enc:?}, json = {json_enc:?}");
+        eprintln!("  decode/msg: cbor = {cbor_dec:?}, json = {json_dec:?}\n");
+    }
 }
